@@ -9,7 +9,7 @@
      CONFIG
      --------------------------------------------------------- */
   const CONTACT_EMAIL = "faathir.kuspratama.pasha36@gmail.com";
-  const STORAGE_KEY = "ftk-theme";
+  const STORAGE_KEY = "ftk-theme"; // keep in sync with theme.js
   const root = document.documentElement;
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -32,12 +32,8 @@
     if (meta) meta.setAttribute("content", theme === "light" ? "#f7f1ef" : "#14100f");
   }
 
-  (function initTheme() {
-    let saved = null;
-    try { saved = localStorage.getItem(STORAGE_KEY); } catch (e) { /* ignore */ }
-    const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
-    applyTheme(saved || (prefersLight ? "light" : "dark"), false);
-  })();
+  // theme.js already set data-theme in <head>; this syncs the toggle and meta tag.
+  applyTheme(root.getAttribute("data-theme"), false);
 
   if (themeToggle) {
     themeToggle.addEventListener("click", function () {
@@ -88,6 +84,12 @@
   const scrollBar = document.getElementById("scrollBar");
   const toTop = document.getElementById("toTop");
   let ticking = false;
+  let maxScroll = 0;
+
+  function measure() {
+    maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+    onScroll();
+  }
 
   function onScroll() {
     const y = window.scrollY || window.pageYOffset;
@@ -95,9 +97,7 @@
     if (toTop) toTop.classList.toggle("is-on", y > 520);
 
     if (scrollBar) {
-      const doc = document.documentElement;
-      const max = doc.scrollHeight - window.innerHeight;
-      const pct = max > 0 ? Math.min(100, (y / max) * 100) : 0;
+      const pct = maxScroll > 0 ? Math.min(100, (y / maxScroll) * 100) : 0;
       scrollBar.style.width = pct + "%";
     }
     ticking = false;
@@ -106,7 +106,10 @@
   window.addEventListener("scroll", function () {
     if (!ticking) { ticking = true; requestAnimationFrame(onScroll); }
   }, { passive: true });
-  onScroll();
+  // Re-measure when the page height changes (fonts, images, resize) instead of every frame.
+  new ResizeObserver(measure).observe(document.body);
+  window.addEventListener("resize", measure);
+  measure();
 
   /* ---------------------------------------------------------
      Back to top — a slow, eased glide
@@ -261,30 +264,49 @@
     let gx = window.innerWidth / 2, gy = window.innerHeight / 2;
     let cx = gx, cy = gy;
 
-    window.addEventListener("pointermove", function (e) {
-      gx = e.clientX; gy = e.clientY;
-      glow.classList.add("is-on");
-    }, { passive: true });
+    let glowFrame = null;
 
-    document.addEventListener("mouseleave", function () { glow.classList.remove("is-on"); });
-
-    (function loop() {
+    // Runs only while the glow is still catching up with the pointer.
+    function follow() {
       cx += (gx - cx) * 0.12;
       cy += (gy - cy) * 0.12;
       glow.style.transform = "translate3d(" + cx + "px," + cy + "px,0)";
-      requestAnimationFrame(loop);
-    })();
+      glowFrame = Math.abs(gx - cx) > 0.1 || Math.abs(gy - cy) > 0.1
+        ? requestAnimationFrame(follow)
+        : null;
+    }
+
+    window.addEventListener("pointermove", function (e) {
+      gx = e.clientX; gy = e.clientY;
+      glow.classList.add("is-on");
+      if (glowFrame === null) glowFrame = requestAnimationFrame(follow);
+    }, { passive: true });
+
+    document.addEventListener("mouseleave", function () { glow.classList.remove("is-on"); });
+  }
+
+  // Run a pointer handler at most once per frame, with the latest event.
+  function perFrame(fn) {
+    let id = null, last;
+    const handler = function (e) {
+      last = e;
+      if (id === null) id = requestAnimationFrame(function () { id = null; fn(last); });
+    };
+    handler.cancel = function () {
+      if (id !== null) { cancelAnimationFrame(id); id = null; }
+    };
+    return handler;
   }
 
   /* ---------------------------------------------------------
      Pointer-tracked glow inside skill cards
      --------------------------------------------------------- */
   document.querySelectorAll(".skill-card").forEach(function (card) {
-    card.addEventListener("pointermove", function (e) {
+    card.addEventListener("pointermove", perFrame(function (e) {
       const rect = card.getBoundingClientRect();
       card.style.setProperty("--mx", (e.clientX - rect.left) + "px");
       card.style.setProperty("--my", (e.clientY - rect.top) + "px");
-    });
+    }));
   });
 
   /* ---------------------------------------------------------
@@ -346,11 +368,6 @@
       // Strip line breaks so the name can't inject extra mail headers.
       const cleanName = name.value.replace(/[\r\n]+/g, " ").trim();
       const subject = "[Portfolio] " + topic.value + " — " + cleanName;
-      const body =
-        "Name: " + name.value.trim() + "\n" +
-        "Email: " + email.value.trim() + "\n" +
-        "Topic: " + topic.value + "\n\n" +
-        message.value.trim();
 
       setSending(true);
       setNote("Sending your message...");
@@ -359,7 +376,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
-          subject: subject,
+          _subject: subject,
           name: cleanName,
           email: email.value.trim(),
           topic: topic.value,
@@ -367,15 +384,16 @@
           _honey: form.elements["_honey"].value,
           _replyto: email.value.trim(),
           _template: "table",
-          _captcha: "false",
-          text: body
+          _captcha: "false"
         })
       })
         .then(function (res) {
           if (!res.ok) throw new Error("Request failed: " + res.status);
           return res.json();
         })
-        .then(function () {
+        .then(function (data) {
+          // FormSubmit can answer 200 with success "false" (e.g. not activated).
+          if (String(data.success) !== "true") throw new Error("Not delivered");
           form.reset();
           setNote("Demo request sent — thanks! I'll reply within 1–2 days.", "is-ok");
         })
@@ -394,6 +412,16 @@
   }
 
   /* ---------------------------------------------------------
+     Avatar fallback if the GitHub image can't load
+     --------------------------------------------------------- */
+  const avatar = document.querySelector(".photo img");
+  if (avatar) {
+    const useFallback = function () { avatar.src = "avatar-fallback.svg"; };
+    avatar.addEventListener("error", useFallback, { once: true });
+    if (avatar.complete && avatar.naturalWidth === 0 && avatar.currentSrc) useFallback();
+  }
+
+  /* ---------------------------------------------------------
      Footer year
      --------------------------------------------------------- */
   const year = document.getElementById("year");
@@ -406,13 +434,15 @@
   if (deck && !reduceMotion && window.matchMedia("(hover: hover)").matches) {
     const hero = document.querySelector(".hero");
     if (hero) {
-      hero.addEventListener("pointermove", function (e) {
+      const move = perFrame(function (e) {
         const r = hero.getBoundingClientRect();
         const dx = (e.clientX - r.left) / r.width - 0.5;
         const dy = (e.clientY - r.top) / r.height - 0.5;
         deck.style.transform = "translate3d(" + (dx * 14) + "px," + (dy * 14) + "px,0)";
       });
+      hero.addEventListener("pointermove", move);
       hero.addEventListener("pointerleave", function () {
+        move.cancel();
         deck.style.transform = "";
       });
     }
